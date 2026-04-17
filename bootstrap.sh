@@ -1,57 +1,80 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generic first-stage bootstrap for Debian.
-# Publish this file separately, then run it with one line on a new server:
-#   sudo REPO_URL='https://github.com/owner/private-repo.git' REPO_BRANCH='develop' bash <(curl -fsSL PUBLIC_URL)
+# First-stage bootstrap for Debian.
+# Installs prerequisites, authenticates to GitHub, clones the private repo
+# into a temporary directory, then launches the second-stage installer from it.
 #
-# Optional variables:
-#   REPO_URL        - required HTTPS URL of the private GitHub repository
-#   REPO_BRANCH     - branch to install, default: main
-#   INSTALL_SCRIPT  - relative path inside the repo, default: deploy/bootstrap-debian.sh
-#   ENABLE_NGINX    - true/false, default: true
+# Example:
+# sudo REPO_URL='https://github.com/OWNER/REPO.git' REPO_BRANCH='develop' \
+#   bash <(curl -fsSL 'https://raw.githubusercontent.com/OWNER/PUBLIC_REPO/main/bootstrap.sh')
 
 REPO_URL="${REPO_URL:-}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 INSTALL_SCRIPT="${INSTALL_SCRIPT:-deploy/bootstrap-debian.sh}"
 ENABLE_NGINX="${ENABLE_NGINX:-true}"
 
-if [[ "${EUID}" -ne 0 ]]; then
-    echo "Run as root, for example:"
-    echo "  sudo REPO_URL='https://github.com/owner/private-repo.git' bash <(curl -fsSL PUBLIC_URL)"
-    exit 1
-fi
-
 if [[ -z "${REPO_URL}" ]]; then
-    echo "Set REPO_URL to the HTTPS address of the private GitHub repository."
+    echo "REPO_URL is required."
     exit 1
 fi
 
-if [[ "${REPO_URL}" == git@* ]]; then
-    echo "Use an HTTPS GitHub repository URL with this bootstrap."
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "Run this script with sudo."
     exit 1
 fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gh
 
-if ! gh auth status --hostname github.com >/dev/null 2>&1; then
-    gh auth login --hostname github.com --git-protocol https
+normalize_repo_slug() {
+    local input="$1"
+    local value="${input%.git}"
+
+    value="${value#https://github.com/}"
+    value="${value#http://github.com/}"
+    value="${value#git@github.com:}"
+    value="${value#ssh://git@github.com/}"
+    value="${value#/}"
+    value="${value%/}"
+
+    if [[ "${value}" != */* ]]; then
+        echo "Could not parse GitHub repository from REPO_URL: ${input}" >&2
+        exit 1
+    fi
+
+    printf '%s' "${value}"
+}
+
+REPO_SLUG="$(normalize_repo_slug "${REPO_URL}")"
+
+if ! gh auth status -h github.com >/dev/null 2>&1; then
+    echo "GitHub authentication is required to download the private repository."
+    gh auth login -h github.com -p https -w
 fi
 
-gh auth setup-git --hostname github.com
+TMP_DIR="$(mktemp -d)"
+cleanup() {
+    rm -rf "${TMP_DIR}"
+}
+trap cleanup EXIT
 
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "${WORK_DIR}"' EXIT
-CHECKOUT_DIR="${WORK_DIR}/repo"
+REPO_DIR="${TMP_DIR}/repo"
 
-git clone --branch "${REPO_BRANCH}" "${REPO_URL}" "${CHECKOUT_DIR}"
+gh repo clone "${REPO_SLUG}" "${REPO_DIR}" -- --branch "${REPO_BRANCH}"
 
-if [[ ! -f "${CHECKOUT_DIR}/${INSTALL_SCRIPT}" ]]; then
-    echo "Install script not found in repository: ${INSTALL_SCRIPT}"
+INSTALL_PATH="${REPO_DIR}/${INSTALL_SCRIPT}"
+if [[ ! -f "${INSTALL_PATH}" ]]; then
+    echo "Install script not found: ${INSTALL_SCRIPT}"
     exit 1
 fi
 
-SOURCE_REPO_DIR="${CHECKOUT_DIR}" \
-ENABLE_NGINX="${ENABLE_NGINX}" \
-bash "${CHECKOUT_DIR}/${INSTALL_SCRIPT}"
+# Important:
+# remove REPO_URL from the environment before launching stage 2,
+# otherwise the second script will try to git clone again into /opt/...
+env -u REPO_URL \
+    SOURCE_REPO_DIR="${REPO_DIR}" \
+    REPO_BRANCH="${REPO_BRANCH}" \
+    ENABLE_NGINX="${ENABLE_NGINX}" \
+    bash "${INSTALL_PATH}"
+
