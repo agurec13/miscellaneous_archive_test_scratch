@@ -76,7 +76,7 @@ choose_option() {
     hide_cursor
 
     while true; do
-        local i=0
+        local i
         for i in "${!options[@]}"; do
             if (( i == selected )); then
                 tty_print "  > ${options[$i]}\n"
@@ -109,7 +109,7 @@ choose_option() {
     done
 
     show_cursor
-    return "${selected}"
+    printf '%s' "${selected}"
 }
 
 normalize_repo_slug() {
@@ -133,16 +133,18 @@ normalize_repo_slug() {
 
 authenticate_github() {
     local token=""
+    local choice=""
 
     unset GH_TOKEN GITHUB_TOKEN
 
     if gh auth status -h github.com >/dev/null 2>&1; then
-        choose_option \
+        choice="$(choose_option \
             "GitHub auth detected. Use Up/Down arrows and Enter:" \
             "Use saved GitHub login" \
             "Login in browser (saved)" \
-            "Use token for this run"
-        case $? in
+            "Use token for this run")"
+
+        case "${choice}" in
             0)
                 return
                 ;;
@@ -155,19 +157,28 @@ authenticate_github() {
                 prompt_secret token "GitHub token"
                 export GH_TOKEN="${token}"
                 ;;
+            *)
+                echo "Unknown menu choice: ${choice}" >&2
+                exit 1
+                ;;
         esac
     else
-        choose_option \
+        choice="$(choose_option \
             "Choose GitHub auth mode. Use Up/Down arrows and Enter:" \
             "Login in browser (saved)" \
-            "Use token for this run"
-        case $? in
+            "Use token for this run")"
+
+        case "${choice}" in
             0)
                 gh auth login -h github.com -p https -w
                 ;;
             1)
                 prompt_secret token "GitHub token"
                 export GH_TOKEN="${token}"
+                ;;
+            *)
+                echo "Unknown menu choice: ${choice}" >&2
+                exit 1
                 ;;
         esac
     fi
